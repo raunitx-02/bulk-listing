@@ -16,8 +16,8 @@ const CONFIG = {
   IS_LOCAL: window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1',
   BASE_URL: 'https://api.keepa.com',
   PROXY_URL: '/api/keepa',
-  BATCH_SIZE: 100,    // ASINs per product call
-  INITIAL_LOAD: 100,  // Initial bestseller ASINs to enrich
+  BATCH_SIZE: 25,     // ASINs per product call (optimized for token usage)
+  INITIAL_LOAD: 25,   // Initial ASINs to enrich on first load
   PAGE_SIZE: 50,      // Rows per page in table
 
   CATEGORIES: {
@@ -205,9 +205,9 @@ async function fetchProductBatch(asins) {
   const data = await keepaFetch('product', {
     asin: asins.join(','),
     history: 0,
-    stats: 180,
-    offers: 20,
-    rating: 1
+    stats: 30,    // 30-day stats only (minimizes token cost vs 180-day)
+    rating: 1     // needed for review count + star rating
+    // NOTE: offers param removed — very expensive on tokens and we don't display offer data
   });
   return data.products || [];
 }
@@ -222,10 +222,20 @@ async function loadCategoryData(catKey) {
     const allAsins = await fetchBestsellers(catKey);
     const toEnrich = allAsins.slice(0, CONFIG.INITIAL_LOAD);
 
-    // Step 2: Enrich in batches
+    // Step 2: Token check — warn if running low
+    if (STATE.tokensLeft !== null && STATE.tokensLeft < 10) {
+      setLoadingText(
+        `⏳ Low on tokens (${STATE.tokensLeft} left) — waiting for refill...`,
+        `Keepa refills 20 tokens/min. Will auto-retry shortly.`
+      );
+      // Wait for some tokens to refill before continuing
+      await sleep(60000);
+    }
+
+    // Step 3: Enrich in batches (25 ASINs each ≈ ~3–5 tokens per batch)
     setLoadingText(
       `Loading ${toEnrich.length} products from Keepa...`,
-      `Fetching title, EAN/GTIN, price, rating & more`
+      `Fetching title, EAN/GTIN, price, rating & more (~3–5 tokens per 25 ASINs)`
     );
     setProgress(35);
 
@@ -238,11 +248,11 @@ async function loadCategoryData(catKey) {
       setProgress(progress);
       setLoadingText(
         `Processing batch ${i + 1} of ${batches}...`,
-        `Enriching ${batch.length} ASINs with product intelligence`
+        `${batch.length} ASINs · Tokens remaining: ${STATE.tokensLeft !== null ? STATE.tokensLeft : '...'}`
       );
       const batchProds = await fetchProductBatch(batch);
       products.push(...batchProds);
-      if (i < batches - 1) await sleep(200); // Rate limit courtesy
+      if (i < batches - 1) await sleep(500); // Small pause between batches
     }
 
     STATE.data[catKey].asins = allAsins;
