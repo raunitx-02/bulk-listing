@@ -160,7 +160,7 @@ async function keepaFetch(endpoint, params, retryCount = 0) {
     updateTokenDisplay();
   }
 
-  if (resp.status === 429 || (data.tokensLeft !== undefined && data.tokensLeft < 0)) {
+  if (resp.status === 429 || (data.error && data.error.message && data.error.message.includes('token'))) {
     if (retryCount >= 5) throw new Error('Token limit reached after 5 retries. Please wait a minute.');
     const refillSec = Math.ceil((data.refillIn || 60000) / 1000);
     await countdownWait(refillSec, retryCount);
@@ -168,6 +168,15 @@ async function keepaFetch(endpoint, params, retryCount = 0) {
   }
 
   if (!resp.ok) throw new Error(`Keepa API error: ${resp.status}`);
+
+  // If the request succeeded but we dropped into token debt (tokensLeft < 0),
+  // Keepa still gives us the data. We just need to wait off the debt BEFORE
+  // moving on, so the *next* request doesn't immediately hit a 429 error.
+  if (data.tokensLeft !== undefined && data.tokensLeft < 0) {
+    const refillSec = Math.ceil((data.refillIn || 60000) / 1000);
+    await countdownWait(refillSec, retryCount);
+  }
+
   return data;
 }
 
