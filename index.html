@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BulkListIQ — Amazon India ASIN Intelligence Platform</title>
+  <meta name="description" content="Real-time bulk Amazon India ASIN discovery and intelligence platform. Explore Consumer Electronics, Car & Motorbike, and Home Improvement categories with live Keepa data." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header class="header" id="main-header">
+    <div class="header-inner">
+      <div class="logo-group">
+        <div class="logo-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="28" height="28" rx="8" fill="url(#logoGrad)"/>
+            <path d="M7 14L11.5 9L16 14L20.5 9" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M7 19L11.5 14L16 19L20.5 14" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.6"/>
+            <defs>
+              <linearGradient id="logoGrad" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#6366F1"/>
+                <stop offset="1" stop-color="#8B5CF6"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div class="logo-text">
+          <span class="logo-name">BulkListIQ</span>
+          <span class="logo-badge">Amazon India</span>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <div class="live-indicator" id="live-indicator">
+          <span class="live-dot"></span>
+          <span class="live-text">Live Keepa Data</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div class="token-display" id="token-display">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          <span id="token-count">— tokens</span>
+        </div>
+        <button class="btn-export" id="btn-export-all" onclick="exportCurrentData()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Export CSV
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN CONTENT -->
+  <main class="main">
+
+    <!-- STATS STRIP -->
+    <section class="stats-strip" id="stats-strip">
+      <div class="stat-card" id="stat-total-asins">
+        <div class="stat-icon" style="background:#EEF2FF; color:#6366F1;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value" id="sv-asins">—</div>
+          <div class="stat-label">Total ASINs Loaded</div>
+        </div>
+      </div>
+      <div class="stat-card" id="stat-brands">
+        <div class="stat-icon" style="background:#FFF7ED; color:#F97316;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value" id="sv-brands">—</div>
+          <div class="stat-label">Unique Brands</div>
+        </div>
+      </div>
+      <div class="stat-card" id="stat-avg-price">
+        <div class="stat-icon" style="background:#F0FDF4; color:#22C55E;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value" id="sv-avg-price">—</div>
+          <div class="stat-label">Avg. Buy Box Price</div>
+        </div>
+      </div>
+      <div class="stat-card" id="stat-ean">
+        <div class="stat-icon" style="background:#FDF4FF; color:#A855F7;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9v6M6 3v18M9 9v6M12 3v18M15 9v6M18 3v18M21 9v6"/></svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value" id="sv-ean">—</div>
+          <div class="stat-label">EAN/GTIN Coverage</div>
+        </div>
+      </div>
+      <div class="stat-card" id="stat-fba">
+        <div class="stat-icon" style="background:#FFF1F2; color:#F43F5E;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7H4a2 2 0 00-2 2v6a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z"/><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/></svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value" id="sv-fba">—</div>
+          <div class="stat-label">FBA %</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CATEGORY TABS -->
+    <section class="category-section">
+      <div class="category-tabs" id="category-tabs">
+        <button class="tab-btn active" id="tab-electronics" data-cat="electronics" onclick="switchCategory('electronics')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+          Consumer Electronics
+          <span class="tab-count" id="count-electronics">—</span>
+        </button>
+        <button class="tab-btn" id="tab-automotive" data-cat="automotive" onclick="switchCategory('automotive')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 17H3a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v9a2 2 0 01-2 2h-2"/><circle cx="9" cy="17" r="2"/><circle cx="17" cy="17" r="2"/></svg>
+          Car & Motorbike
+          <span class="tab-count" id="count-automotive">—</span>
+        </button>
+        <button class="tab-btn" id="tab-home" data-cat="home" onclick="switchCategory('home')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          Home & Kitchen
+          <span class="tab-count" id="count-home">—</span>
+        </button>
+      </div>
+
+      <!-- CONTROLS BAR -->
+      <div class="controls-bar">
+        <div class="search-wrapper">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="search-input" class="search-input" placeholder="Search by ASIN, title, brand, EAN..." oninput="filterTable()" />
+          <button class="search-clear" id="search-clear" onclick="clearSearch()" style="display:none;">✕</button>
+        </div>
+        <div class="control-group">
+          <select class="filter-select" id="filter-brand" onchange="filterTable()">
+            <option value="">All Brands</option>
+          </select>
+          <select class="filter-select" id="filter-rating" onchange="filterTable()">
+            <option value="">All Ratings</option>
+            <option value="4.5">4.5★ & above</option>
+            <option value="4">4★ & above</option>
+            <option value="3.5">3.5★ & above</option>
+            <option value="3">3★ & above</option>
+          </select>
+          <select class="filter-select" id="filter-ean" onchange="filterTable()">
+            <option value="">EAN: All</option>
+            <option value="has">Has EAN/GTIN</option>
+            <option value="none">No EAN</option>
+          </select>
+          <button class="btn-load-more" id="btn-load-more" onclick="loadMoreProducts()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+            Load More
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- LOADING STATE -->
+    <div class="loading-state" id="loading-state">
+      <div class="loading-spinner">
+        <div class="spinner-ring"></div>
+        <div class="spinner-ring spinner-ring--2"></div>
+        <div class="spinner-ring spinner-ring--3"></div>
+      </div>
+      <p class="loading-title" id="loading-title">Fetching live data from Keepa...</p>
+      <p class="loading-sub" id="loading-sub">Connecting to Amazon India catalog</p>
+      <div class="loading-progress">
+        <div class="loading-bar" id="loading-bar"></div>
+      </div>
+    </div>
+
+    <!-- ERROR STATE -->
+    <div class="error-state" id="error-state" style="display:none;">
+      <div class="error-icon">⚠️</div>
+      <p class="error-title" id="error-title">Failed to load data</p>
+      <p class="error-sub" id="error-sub">Please check your API key and try again</p>
+      <button class="btn-retry" onclick="retryLoad()">Retry</button>
+    </div>
+
+    <!-- DATA TABLE -->
+    <div class="table-wrapper" id="table-wrapper" style="display:none;">
+      <div class="table-meta">
+        <span class="table-showing" id="table-showing">Showing 0 products</span>
+        <div class="table-sort-hint">Click column headers to sort</div>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table" id="data-table">
+          <thead>
+            <tr>
+              <th class="col-num">#</th>
+              <th class="col-asin sortable" onclick="sortTable('asin')" id="th-asin">
+                ASIN <span class="sort-arrow">↕</span>
+              </th>
+              <th class="col-title sortable" onclick="sortTable('title')" id="th-title">
+                Product Title <span class="sort-arrow">↕</span>
+              </th>
+              <th class="col-brand sortable" onclick="sortTable('brand')" id="th-brand">
+                Brand <span class="sort-arrow">↕</span>
+              </th>
+              <th class="col-ean sortable" onclick="sortTable('ean')" id="th-ean">
+                EAN / GTIN <span class="sort-arrow">↕</span>
+              </th>
+              <th class="col-price sortable" onclick="sortTable('price')" id="th-price">
+                Price ₹ <span class="sort-arrow">↕</span>
+              </th>
+              <th class="col-rating sortable" onclick="sortTable('rating')" id="th-rating">
+                Rating <span class="sort-arrow">↕</span>
+              </th>
+              <th class="col-reviews sortable" onclick="sortTable('reviews')" id="th-reviews">
+                Reviews <span class="sort-arrow">↕</span>
+              </th>
+              <th class="col-rank sortable" onclick="sortTable('rank')" id="th-rank">
+                BSR <span class="sort-arrow">↕</span>
+              </th>
+              <th class="col-fba">FBA</th>
+              <th class="col-link">Amazon</th>
+            </tr>
+          </thead>
+          <tbody id="table-body">
+          </tbody>
+        </table>
+      </div>
+      <div class="table-footer">
+        <div class="pagination" id="pagination"></div>
+        <div class="export-footer">
+          <button class="btn-export-sm" onclick="exportCurrentData()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export CSV
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- TOAST NOTIFICATIONS -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
