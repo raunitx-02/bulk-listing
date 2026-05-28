@@ -425,17 +425,11 @@ function getFilteredProducts() {
           return dir * (gp(a) - gp(b));
         }
         case 'rating': {
-          const gr = p => {
-            const rc = p.reviews?.ratingCount;
-            return rc?.length >= 2 ? rc[rc.length - 1] : 0;
-          };
+          const gr = p => p.stats?.current?.[16] || 0;
           return dir * (gr(a) - gr(b));
         }
         case 'reviews': {
-          const gv = p => {
-            const rc = p.reviews?.reviewCount;
-            return rc?.length >= 2 ? rc[rc.length - 1] : 0;
-          };
+          const gv = p => p.stats?.current?.[17] || 0;
           return dir * (gv(a) - gv(b));
         }
         case 'rank': {
@@ -499,13 +493,12 @@ function renderTable() {
       : `<span class="price-na">—</span>`;
 
     // Rating
-    const rc = p.reviews?.ratingCount;
-    const rawRating = rc?.length >= 2 ? rc[rc.length - 1] : null;
-    const rating = rawRating ? (rawRating / 10).toFixed(1) : null;
+    const rawRating = p.stats?.current?.[16];
+    const rating = (rawRating && rawRating > 0) ? (rawRating / 10).toFixed(1) : null;
 
     // Reviews
-    const rvc = p.reviews?.reviewCount;
-    const reviews = rvc?.length >= 2 ? rvc[rvc.length - 1] : 0;
+    const rawReviews = p.stats?.current?.[17];
+    const reviews = (rawReviews && rawReviews > 0) ? rawReviews : 0;
 
     // BSR
     let bsr = null;
@@ -743,10 +736,10 @@ function exportCurrentData() {
     else if (c?.[1] > 0) rawPrice = c[1];
     else if (c?.[0] > 0) rawPrice = c[0];
 
-    const rc  = p.reviews?.ratingCount;
-    const rvc = p.reviews?.reviewCount;
-    const rating  = rc?.length  >= 2 ? (rc[rc.length - 1]   / 10).toFixed(1) : '';
-    const reviews = rvc?.length >= 2 ? rvc[rvc.length - 1] : '';
+    const rawRating = p.stats?.current?.[16];
+    const rawReviews = p.stats?.current?.[17];
+    const rating  = (rawRating && rawRating > 0) ? (rawRating / 10).toFixed(1) : '';
+    const reviews = (rawReviews && rawReviews > 0) ? rawReviews : '';
 
     let bsr = '';
     const sr = p.salesRanks;
