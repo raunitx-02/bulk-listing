@@ -174,7 +174,7 @@ async function keepaFetch(endpoint, params, retryCount = 0) {
   // moving on, so the *next* request doesn't immediately hit a 429 error.
   if (data.tokensLeft !== undefined && data.tokensLeft < 0) {
     const refillSec = Math.ceil((data.refillIn || 60000) / 1000);
-    await countdownWait(refillSec, retryCount);
+    await countdownDebtWait(refillSec);
   }
 
   return data;
@@ -191,6 +191,18 @@ async function countdownWait(seconds, attempt) {
     await sleep(800);
   }
   setLoadingText('🔄 Retrying...', 'Reconnecting to Keepa API');
+}
+
+async function countdownDebtWait(seconds) {
+  const end = Date.now() + seconds * 1000 + 500;
+  while (Date.now() < end) {
+    const rem = Math.ceil((end - Date.now()) / 1000);
+    setLoadingText(
+      `🔋 Recharging Keepa tokens (${rem}s remaining)...`,
+      `Bestsellers list fetched successfully! Waiting for tokens to refill before loading products.`
+    );
+    await sleep(800);
+  }
 }
 
 // ============================================================
