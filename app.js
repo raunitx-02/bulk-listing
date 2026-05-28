@@ -1,6 +1,6 @@
 /* ============================================================
    BulkListIQ — JavaScript Application
-   Real-time Keepa API Integration for Amazon India ASIN Explorer
+   Real-time Keepa API with 24h localStorage caching
    ============================================================ */
 
 'use strict';
@@ -9,39 +9,20 @@
 // CONFIG
 // ============================================================
 const CONFIG = {
-  KEEPA_KEY: 'pa8osmtpo6bq3bbf3vgfqmp78p0ifbouv34flbvs51hsjqkb7kg6qjgddpspinlp', // used only on localhost
-  DOMAIN: 10,  // Amazon India
-  // On Vercel: use the secure server-side proxy (key stays in env vars)
-  // On localhost: call Keepa directly (for development)
+  KEEPA_KEY: 'pa8osmtpo6bq3bbf3vgfqmp78p0ifbouv34flbvs51hsjqkb7kg6qjgddpspinlp',
+  DOMAIN: 10,
   IS_LOCAL: window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1',
   BASE_URL: 'https://api.keepa.com',
   PROXY_URL: '/api/keepa',
-  BATCH_SIZE: 25,     // ASINs per product call (optimized for token usage)
-  INITIAL_LOAD: 25,   // Initial ASINs to enrich on first load
-  PAGE_SIZE: 50,      // Rows per page in table
+  BATCH_SIZE: 10,      // 10 ASINs per product call (~10 tokens per call)
+  INITIAL_LOAD: 10,    // Load 10 products on first open
+  PAGE_SIZE: 50,
+  CACHE_TTL_MS: 24 * 60 * 60 * 1000, // 24 hours
 
   CATEGORIES: {
-    electronics: {
-      id: 976419031,
-      name: 'Consumer Electronics',
-      icon: '📱',
-      color: '#6366F1',
-      description: 'Smartphones, headphones, laptops & more'
-    },
-    automotive: {
-      id: 4772060031,
-      name: 'Car & Motorbike',
-      icon: '🚗',
-      color: '#F97316',
-      description: 'Car accessories, motorbike parts & care products'
-    },
-    home: {
-      id: 3704992031,
-      name: 'Home & Kitchen',
-      icon: '🏠',
-      color: '#22C55E',
-      description: 'Kitchen appliances, home décor & improvement'
-    }
+    electronics: { id: 976419031,  name: 'Consumer Electronics', color: '#6366F1' },
+    automotive:  { id: 4772060031, name: 'Car & Motorbike',       color: '#F97316' },
+    home:        { id: 3704992031, name: 'Home & Kitchen',        color: '#22C55E' }
   }
 };
 
@@ -51,9 +32,9 @@ const CONFIG = {
 const STATE = {
   activeCategory: 'electronics',
   data: {
-    electronics: { asins: [], products: [], loaded: false, bestsellersAsins: [] },
-    automotive:  { asins: [], products: [], loaded: false, bestsellersAsins: [] },
-    home:        { asins: [], products: [], loaded: false, bestsellersAsins: [] }
+    electronics: { products: [], loaded: false, bestsellersAsins: [], fromCache: false },
+    automotive:  { products: [], loaded: false, bestsellersAsins: [], fromCache: false },
+    home:        { products: [], loaded: false, bestsellersAsins: [], fromCache: false }
   },
   filtered: [],
   sorted: { col: null, dir: 'asc' },
@@ -63,44 +44,80 @@ const STATE = {
   loading: false
 };
 
-// ============================================================
-// DOM REFERENCES
-// ============================================================
 const $ = id => document.getElementById(id);
+
+// ============================================================
+// LOCAL STORAGE CACHE — KEY FEATURE: saves tokens on every revisit
+// Bestsellers alone costs 50 tokens per call!
+// With caching: pay tokens ONCE per 24h, then FREE forever.
+// ============================================================
+function cacheGet(type, catKey) {
+  try {
+    const raw = localStorage.getItem(`bliq_${type}_${catKey}`);
+    if (!raw) return null;
+    const { ts, data } = JSON.parse(raw);
+    if (Date.now() - ts > CONFIG.CACHE_TTL_MS) {
+      localStorage.removeItem(`bliq_${type}_${catKey}`);
+      return null;
+    }
+    return data;
+  } catch (e) { return null; }
+}
+
+function cacheSet(type, catKey, data) {
+  try {
+    localStorage.setItem(`bliq_${type}_${catKey}`, JSON.stringify({ ts: Date.now(), data }));
+  } catch (e) { console.warn('Cache write failed (storage full?):', e); }
+}
+
+function cacheAge(catKey) {
+  try {
+    const raw = localStorage.getItem(`bliq_products_${catKey}`);
+    if (!raw) return null;
+    const { ts } = JSON.parse(raw);
+    const ms = Date.now() - ts;
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    return h > 0 ? `${h}h ${m}m ago` : `${m}m ago`;
+  } catch (e) { return null; }
+}
+
+function clearAllCache() {
+  ['electronics', 'automotive', 'home'].forEach(cat => {
+    localStorage.removeItem(`bliq_asins_${cat}`);
+    localStorage.removeItem(`bliq_products_${cat}`);
+    STATE.data[cat].loaded = false;
+    STATE.data[cat].products = [];
+    STATE.data[cat].bestsellersAsins = [];
+    STATE.data[cat].fromCache = false;
+    $(`count-${cat}`).textContent = '—';
+  });
+  hideCacheBadge();
+  showToast('🗑️ Cache cleared — will fetch fresh data', 'info');
+  retryLoad();
+}
 
 // ============================================================
 // UTILS
 // ============================================================
-function keepaPrice(raw) {
-  if (!raw || raw === -1 || raw < 0) return null;
-  return (raw / 100).toFixed(2);
-}
-
-function keepaRating(raw) {
-  if (!raw || raw < 0) return null;
-  return (raw / 10).toFixed(1);
-}
-
 function formatNumber(n) {
   if (!n && n !== 0) return '—';
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  if (n >= 1000)    return (n / 1000).toFixed(1) + 'K';
   return n.toLocaleString('en-IN');
 }
 
-function formatPrice(raw) {
-  const val = keepaPrice(raw);
-  if (!val) return null;
-  return '₹' + parseFloat(val).toLocaleString('en-IN');
-}
-
 function starsHtml(rating) {
-  if (!rating) return '';
-  const r = parseFloat(rating);
+  const r = parseFloat(rating) || 0;
   const full = Math.floor(r);
   const half = r - full >= 0.5 ? 1 : 0;
   const empty = 5 - full - half;
   return '★'.repeat(full) + (half ? '½' : '') + '☆'.repeat(empty);
+}
+
+function formatPrice(raw) {
+  if (!raw || raw < 0) return null;
+  return '₹' + (raw / 100).toLocaleString('en-IN');
 }
 
 function debounce(fn, ms) {
@@ -108,20 +125,23 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function escapeHtml(str) {
+  return (str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 // ============================================================
-// KEEPA API — with smart rate-limit retry + countdown
+// KEEPA API — with 429 auto-retry
 // ============================================================
 async function keepaFetch(endpoint, params, retryCount = 0) {
   let url;
-
   if (CONFIG.IS_LOCAL) {
-    // Local dev: call Keepa directly
     url = new URL(`${CONFIG.BASE_URL}/${endpoint}`);
     url.searchParams.set('key', CONFIG.KEEPA_KEY);
     url.searchParams.set('domain', CONFIG.DOMAIN);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   } else {
-    // Vercel deployment: use server-side proxy (key is in env vars)
     url = new URL(CONFIG.PROXY_URL, window.location.origin);
     url.searchParams.set('endpoint', endpoint);
     url.searchParams.set('domain', CONFIG.DOMAIN);
@@ -129,74 +149,66 @@ async function keepaFetch(endpoint, params, retryCount = 0) {
   }
 
   let resp;
-  try {
-    resp = await fetch(url.toString());
-  } catch (netErr) {
-    throw new Error('Network error — check your internet connection');
-  }
+  try { resp = await fetch(url.toString()); }
+  catch (e) { throw new Error('Network error — check internet connection'); }
 
-  // Parse response body regardless of status (Keepa returns JSON even on 429)
   let data = {};
   try { data = await resp.json(); } catch (_) {}
 
-  // Update token count from response
   if (data.tokensLeft !== undefined) {
     STATE.tokensLeft = data.tokensLeft;
     updateTokenDisplay();
   }
 
-  // Handle 429 (Too Many Requests) / token exhaustion
   if (resp.status === 429 || (data.tokensLeft !== undefined && data.tokensLeft < 0)) {
-    const refillInMs = data.refillIn || 60000; // fallback 60s
-    const refillInSec = Math.ceil(refillInMs / 1000);
-
-    if (retryCount >= 5) {
-      throw new Error(`Token limit reached after ${retryCount} retries. Please wait a moment and try again.`);
-    }
-
-    // Show countdown in the loading UI
-    await countdownWait(refillInSec, retryCount);
-
-    // Retry after refill
+    if (retryCount >= 5) throw new Error('Token limit reached after 5 retries. Please wait a minute.');
+    const refillSec = Math.ceil((data.refillIn || 60000) / 1000);
+    await countdownWait(refillSec, retryCount);
     return keepaFetch(endpoint, params, retryCount + 1);
   }
 
-  if (!resp.ok) {
-    throw new Error(`Keepa API error: ${resp.status} ${resp.statusText}`);
-  }
-
+  if (!resp.ok) throw new Error(`Keepa API error: ${resp.status}`);
   return data;
 }
 
 async function countdownWait(seconds, attempt) {
-  const start = Date.now();
-  const end = start + (seconds * 1000) + 500;
-
+  const end = Date.now() + seconds * 1000 + 500;
   while (Date.now() < end) {
-    const remaining = Math.ceil((end - Date.now()) / 1000);
-    const tokStr = STATE.tokensLeft !== null ? ` (${STATE.tokensLeft} tokens)` : '';
+    const rem = Math.ceil((end - Date.now()) / 1000);
     setLoadingText(
-      `⏳ Token limit reached — auto-retrying in ${remaining}s`,
-      `Keepa refills 20 tokens/minute${tokStr}. Attempt ${attempt + 1} of 5...`
+      `⏳ Token limit reached — auto-retrying in ${rem}s`,
+      `Keepa refills 20 tokens/min. Attempt ${attempt + 1}/5`
     );
-    // Also show in error-state if visible
-    const errSub = $('error-sub');
-    if (errSub) errSub.textContent = `Tokens refilling... retrying in ${remaining}s`;
     await sleep(800);
   }
-
-  setLoadingText('🔄 Retrying request...', 'Reconnecting to Keepa API');
+  setLoadingText('🔄 Retrying...', 'Reconnecting to Keepa API');
 }
 
+// ============================================================
+// DATA FETCHING
+// ============================================================
 async function fetchBestsellers(catKey) {
   const cat = CONFIG.CATEGORIES[catKey];
-  setLoadingText(`Fetching bestsellers from ${cat.name}...`, 'Connecting to Amazon India catalog via Keepa');
-  setProgress(15);
 
+  // ✅ Check cache first — saves 50 tokens per call!
+  const cached = cacheGet('asins', catKey);
+  if (cached && cached.length > 0) {
+    STATE.data[catKey].bestsellersAsins = cached;
+    $(`count-${catKey}`).textContent = formatNumber(cached.length);
+    return cached;
+  }
+
+  // Not cached — fetch from Keepa (~50 tokens)
+  setLoadingText(
+    `Fetching ${cat.name} bestsellers...`,
+    'Note: This call costs ~50 tokens and will be cached for 24h'
+  );
+  setProgress(15);
   const data = await keepaFetch('bestsellers', { category: cat.id });
   const asins = (data.bestSellersList?.asinList || []).filter(Boolean);
   STATE.data[catKey].bestsellersAsins = asins;
   $(`count-${catKey}`).textContent = formatNumber(asins.length);
+  cacheSet('asins', catKey, asins); // Cache immediately
   return asins;
 }
 
@@ -205,71 +217,90 @@ async function fetchProductBatch(asins) {
   const data = await keepaFetch('product', {
     asin: asins.join(','),
     history: 0,
-    stats: 30,    // 30-day stats only (minimizes token cost vs 180-day)
-    rating: 1     // needed for review count + star rating
-    // NOTE: offers param removed — very expensive on tokens and we don't display offer data
+    stats: 30,   // 30-day stats for price data
+    rating: 1    // for review count & star rating
   });
   return data.products || [];
 }
 
+// ============================================================
+// MAIN LOAD FUNCTION
+// ============================================================
 async function loadCategoryData(catKey) {
   if (STATE.data[catKey].loaded) return;
   STATE.loading = true;
   showLoading();
 
   try {
-    // Step 1: Get bestseller ASINs
-    const allAsins = await fetchBestsellers(catKey);
-    const toEnrich = allAsins.slice(0, CONFIG.INITIAL_LOAD);
+    // ✅ Step 1: Check product cache — COMPLETELY FREE (0 tokens)
+    const cachedProducts = cacheGet('products', catKey);
+    const cachedAsins    = cacheGet('asins',    catKey);
 
-    // Step 2: Token check — warn if running low
-    if (STATE.tokensLeft !== null && STATE.tokensLeft < 10) {
-      setLoadingText(
-        `⏳ Low on tokens (${STATE.tokensLeft} left) — waiting for refill...`,
-        `Keepa refills 20 tokens/min. Will auto-retry shortly.`
-      );
-      // Wait for some tokens to refill before continuing
-      await sleep(60000);
+    if (cachedProducts && cachedProducts.length > 0) {
+      const age = cacheAge(catKey);
+      setLoadingText('📦 Loading from cache...', `Cached ${age || 'recently'} · 0 tokens used`);
+      setProgress(90);
+      await sleep(350);
+
+      if (cachedAsins) {
+        STATE.data[catKey].bestsellersAsins = cachedAsins;
+        $(`count-${catKey}`).textContent = formatNumber(cachedAsins.length);
+      }
+      STATE.data[catKey].products = cachedProducts;
+      STATE.data[catKey].loaded = true;
+      STATE.data[catKey].fromCache = true;
+      setProgress(100);
+
+      renderTable(); updateStats(); populateBrandFilter(); showTable();
+      showCacheBadge(catKey, age);
+      showToast(`📦 Served from cache (${age || 'just now'}) · 0 tokens used`, 'success');
+      return;
     }
 
-    // Step 3: Enrich in batches (25 ASINs each ≈ ~3–5 tokens per batch)
+    // No cache — fetch live data
+    STATE.data[catKey].fromCache = false;
+    hideCacheBadge();
+
+    // Step 2: Get ASIN list (cached internally above)
+    const allAsins   = await fetchBestsellers(catKey);
+    const toEnrich   = allAsins.slice(0, CONFIG.INITIAL_LOAD);
+
+    // Step 3: Enrich products
     setLoadingText(
-      `Loading ${toEnrich.length} products from Keepa...`,
-      `Fetching title, EAN/GTIN, price, rating & more (~3–5 tokens per 25 ASINs)`
+      `Loading ${toEnrich.length} products...`,
+      `Tokens remaining: ${STATE.tokensLeft ?? '...'}`
     );
-    setProgress(35);
+    setProgress(40);
 
     const products = [];
-    const batches = Math.ceil(toEnrich.length / CONFIG.BATCH_SIZE);
+    const batches  = Math.ceil(toEnrich.length / CONFIG.BATCH_SIZE);
 
     for (let i = 0; i < batches; i++) {
       const batch = toEnrich.slice(i * CONFIG.BATCH_SIZE, (i + 1) * CONFIG.BATCH_SIZE);
-      const progress = 35 + Math.round(((i + 1) / batches) * 60);
-      setProgress(progress);
+      setProgress(40 + Math.round(((i + 1) / batches) * 55));
       setLoadingText(
-        `Processing batch ${i + 1} of ${batches}...`,
-        `${batch.length} ASINs · Tokens remaining: ${STATE.tokensLeft !== null ? STATE.tokensLeft : '...'}`
+        `Enriching batch ${i + 1}/${batches}...`,
+        `Tokens remaining: ${STATE.tokensLeft ?? '...'}`
       );
       const batchProds = await fetchProductBatch(batch);
       products.push(...batchProds);
-      if (i < batches - 1) await sleep(500); // Small pause between batches
+      if (i < batches - 1) await sleep(300);
     }
 
-    STATE.data[catKey].asins = allAsins;
     STATE.data[catKey].products = products;
-    STATE.data[catKey].loaded = true;
+    STATE.data[catKey].loaded   = true;
     setProgress(100);
+
+    // ✅ Cache for 24h — next visits are FREE
+    cacheSet('products', catKey, products);
     await sleep(300);
 
-    renderTable();
-    updateStats();
-    populateBrandFilter();
-    showTable();
-    showToast(`✅ Loaded ${products.length} products from ${CONFIG.CATEGORIES[catKey].name}`, 'success');
+    renderTable(); updateStats(); populateBrandFilter(); showTable();
+    showToast(`✅ ${products.length} products loaded · Cached 24h (next visit FREE)`, 'success');
 
   } catch (err) {
-    console.error('Load error:', err);
-    showError('Failed to load data', err.message || 'API request failed. Check console for details.');
+    console.error(err);
+    showError('Failed to load data', err.message || 'Check console for details');
   } finally {
     STATE.loading = false;
   }
@@ -277,18 +308,17 @@ async function loadCategoryData(catKey) {
 
 async function loadMoreProducts() {
   const catKey = STATE.activeCategory;
-  const cat = STATE.data[catKey];
+  const cat    = STATE.data[catKey];
   if (!cat.loaded || STATE.loading) return;
 
   const $btn = $('btn-load-more');
   $btn.disabled = true;
   $btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> Loading...`;
-
   STATE.loading = true;
 
   try {
-    const alreadyLoaded = cat.products.length;
-    const toEnrich = cat.bestsellersAsins.slice(alreadyLoaded, alreadyLoaded + CONFIG.INITIAL_LOAD);
+    const loaded   = cat.products.length;
+    const toEnrich = cat.bestsellersAsins.slice(loaded, loaded + CONFIG.INITIAL_LOAD);
 
     if (!toEnrich.length) {
       showToast('ℹ️ All available products already loaded', 'info');
@@ -302,25 +332,23 @@ async function loadMoreProducts() {
       const batch = toEnrich.slice(i * CONFIG.BATCH_SIZE, (i + 1) * CONFIG.BATCH_SIZE);
       const batchProds = await fetchProductBatch(batch);
       cat.products.push(...batchProds);
-      if (i < batches - 1) await sleep(200);
+      if (i < batches - 1) await sleep(300);
     }
 
-    renderTable();
-    updateStats();
-    populateBrandFilter();
+    // Update cache with new products
+    cacheSet('products', catKey, cat.products);
+
+    renderTable(); updateStats(); populateBrandFilter();
     showToast(`✅ Loaded ${toEnrich.length} more products`, 'success');
 
   } catch (err) {
-    showToast('❌ Failed to load more products', 'error');
-    console.error(err);
+    showToast('❌ Failed to load more: ' + err.message, 'error');
   } finally {
     STATE.loading = false;
     $btn.disabled = false;
     $btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg> Load More`;
   }
 }
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ============================================================
 // CATEGORY SWITCHING
@@ -331,12 +359,10 @@ function switchCategory(catKey) {
   STATE.page = 1;
   STATE.sorted = { col: null, dir: 'asc' };
 
-  // Update tab UI
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.cat === catKey);
-  });
+  document.querySelectorAll('.tab-btn').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.cat === catKey)
+  );
 
-  // Clear search/filters
   $('search-input').value = '';
   $('search-clear').style.display = 'none';
   $('filter-brand').value = '';
@@ -344,10 +370,9 @@ function switchCategory(catKey) {
   $('filter-ean').value = '';
 
   if (STATE.data[catKey].loaded) {
-    renderTable();
-    updateStats();
-    populateBrandFilter();
-    showTable();
+    renderTable(); updateStats(); populateBrandFilter(); showTable();
+    if (STATE.data[catKey].fromCache) showCacheBadge(catKey, cacheAge(catKey));
+    else hideCacheBadge();
   } else {
     showLoading();
     loadCategoryData(catKey);
@@ -358,101 +383,89 @@ function switchCategory(catKey) {
 // TABLE RENDERING
 // ============================================================
 function getFilteredProducts() {
-  const catKey = STATE.activeCategory;
-  let products = [...STATE.data[catKey].products];
+  let products = [...STATE.data[STATE.activeCategory].products];
 
-  const query = $('search-input').value.toLowerCase().trim();
-  const filterBrand = $('filter-brand').value.toLowerCase();
-  const filterRating = parseFloat($('filter-rating').value) || 0;
-  const filterEan = $('filter-ean').value;
+  const q   = $('search-input').value.toLowerCase().trim();
+  const fBr = $('filter-brand').value.toLowerCase();
+  const fRt = parseFloat($('filter-rating').value) || 0;
+  const fEn = $('filter-ean').value;
 
-  if (query) {
-    products = products.filter(p => {
-      const t = (p.title || '').toLowerCase();
-      const a = (p.asin || '').toLowerCase();
-      const b = (p.brand || '').toLowerCase();
-      const ean = (p.eanList || []).join(' ').toLowerCase();
-      return t.includes(query) || a.includes(query) || b.includes(query) || ean.includes(query);
-    });
-  }
+  if (q)   products = products.filter(p =>
+    [(p.title||''),(p.asin||''),(p.brand||''),(p.eanList||[]).join(' ')]
+      .some(s => s.toLowerCase().includes(q))
+  );
+  if (fBr) products = products.filter(p => (p.brand||'').toLowerCase() === fBr);
+  if (fRt) products = products.filter(p => {
+    const rc = p.reviews?.ratingCount;
+    if (!rc || rc.length < 2) return false;
+    return (rc[rc.length - 1] / 10) >= fRt;
+  });
+  if (fEn === 'has')  products = products.filter(p => p.eanList?.length > 0);
+  if (fEn === 'none') products = products.filter(p => !p.eanList?.length);
 
-  if (filterBrand) {
-    products = products.filter(p => (p.brand || '').toLowerCase() === filterBrand);
-  }
-
-  if (filterRating) {
-    products = products.filter(p => {
-      const r = keepaRating(p.avgRating);
-      return r && parseFloat(r) >= filterRating;
-    });
-  }
-
-  if (filterEan === 'has') {
-    products = products.filter(p => p.eanList && p.eanList.length > 0);
-  } else if (filterEan === 'none') {
-    products = products.filter(p => !p.eanList || p.eanList.length === 0);
-  }
-
-  // Sorting
   if (STATE.sorted.col) {
+    const col = STATE.sorted.col;
+    const dir = STATE.sorted.dir === 'asc' ? 1 : -1;
+
     products.sort((a, b) => {
       let va, vb;
-      switch (STATE.sorted.col) {
-        case 'asin':    va = a.asin || ''; vb = b.asin || ''; break;
-        case 'title':   va = a.title || ''; vb = b.title || ''; break;
-        case 'brand':   va = a.brand || ''; vb = b.brand || ''; break;
-        case 'ean':
-          va = (a.eanList || [])[0] || '';
-          vb = (b.eanList || [])[0] || '';
-          break;
-        case 'price':
-          {
-            const getP = prod => {
-              const cur = prod.stats?.current;
-              const bbp = prod.stats?.buyBoxPrice;
-              if (bbp && bbp > 0) return bbp;
-              if (cur && cur[1] > 0) return cur[1];
-              if (cur && cur[0] > 0) return cur[0];
-              return Infinity;
-            };
-            va = getP(a); vb = getP(b);
-          }
-          break;
-        case 'rating':
-          va = (a.reviews?.ratingCount?.length >= 2 ? a.reviews.ratingCount[a.reviews.ratingCount.length - 1] : 0);
-          vb = (b.reviews?.ratingCount?.length >= 2 ? b.reviews.ratingCount[b.reviews.ratingCount.length - 1] : 0);
-          break;
-        case 'reviews':
-          va = (a.reviews?.reviewCount?.length >= 2 ? a.reviews.reviewCount[a.reviews.reviewCount.length - 1] : 0);
-          vb = (b.reviews?.reviewCount?.length >= 2 ? b.reviews.reviewCount[b.reviews.reviewCount.length - 1] : 0);
-          break;
-        case 'rank':
-          va = a.salesRanks?.[Object.keys(a.salesRanks || {})[0]]?.slice(-2)?.[1] || Infinity;
-          vb = b.salesRanks?.[Object.keys(b.salesRanks || {})[0]]?.slice(-2)?.[1] || Infinity;
-          break;
+      switch (col) {
+        case 'asin':    va = a.asin||'';       vb = b.asin||'';       break;
+        case 'title':   va = a.title||'';      vb = b.title||'';      break;
+        case 'brand':   va = a.brand||'';      vb = b.brand||'';      break;
+        case 'ean':     va = (a.eanList||[])[0]||''; vb = (b.eanList||[])[0]||''; break;
+        case 'price': {
+          const gp = p => {
+            const c = p.stats?.current, bb = p.stats?.buyBoxPrice;
+            if (bb && bb > 0) return bb;
+            if (c && c[1] > 0) return c[1];
+            if (c && c[0] > 0) return c[0];
+            return Infinity;
+          };
+          return dir * (gp(a) - gp(b));
+        }
+        case 'rating': {
+          const gr = p => {
+            const rc = p.reviews?.ratingCount;
+            return rc?.length >= 2 ? rc[rc.length - 1] : 0;
+          };
+          return dir * (gr(a) - gr(b));
+        }
+        case 'reviews': {
+          const gv = p => {
+            const rc = p.reviews?.reviewCount;
+            return rc?.length >= 2 ? rc[rc.length - 1] : 0;
+          };
+          return dir * (gv(a) - gv(b));
+        }
+        case 'rank': {
+          const gr = p => {
+            const sr = p.salesRanks;
+            if (!sr) return Infinity;
+            const k = Object.keys(sr)[0];
+            const v = sr[k];
+            return Array.isArray(v) && v.length >= 2 ? v[v.length - 1] : Infinity;
+          };
+          return dir * (gr(a) - gr(b));
+        }
         default: va = ''; vb = '';
       }
-      if (typeof va === 'string') {
-        const cmp = va.localeCompare(vb);
-        return STATE.sorted.dir === 'asc' ? cmp : -cmp;
-      }
-      return STATE.sorted.dir === 'asc' ? va - vb : vb - va;
+      if (typeof va === 'string') return dir * va.localeCompare(vb);
+      return dir * (va - vb);
     });
   }
-
   return products;
 }
 
 function renderTable() {
   const filtered = getFilteredProducts();
-  STATE.filtered = filtered;
-  const total = filtered.length;
-
+  STATE.filtered  = filtered;
+  const total     = filtered.length;
   STATE.totalPages = Math.max(1, Math.ceil(total / CONFIG.PAGE_SIZE));
   if (STATE.page > STATE.totalPages) STATE.page = 1;
 
   const start = (STATE.page - 1) * CONFIG.PAGE_SIZE;
-  const page = filtered.slice(start, start + CONFIG.PAGE_SIZE);
+  const page  = filtered.slice(start, start + CONFIG.PAGE_SIZE);
 
   $('table-showing').textContent =
     `Showing ${start + 1}–${Math.min(start + page.length, total)} of ${formatNumber(total)} products`;
@@ -468,60 +481,43 @@ function renderTable() {
 
   page.forEach((p, idx) => {
     const rowNum = start + idx + 1;
-    const asin = p.asin || '—';
-    const title = p.title || 'Unknown Product';
-    const brand = p.brand || '';
-    const eans = p.eanList || [];
-    const ean = eans[0] || null;
+    const asin   = p.asin  || '—';
+    const title  = p.title || 'Unknown Product';
+    const brand  = p.brand || '';
+    const eans   = p.eanList || [];
+    const ean    = eans[0] || null;
 
-    // Price: stats.current is array of prices in keepa CSV format
-    // For Amazon.in, stats.buyBoxPrice or stats.current[0] = Amazon price, current[1] = new price, etc.
+    // Price
     let rawPrice = -1;
-    if (p.stats) {
-      // stats.current layout: [Amazon, New, Used, Sales Rank, ...]
-      const cur = p.stats.current;
-      if (p.stats.buyBoxPrice && p.stats.buyBoxPrice > 0) {
-        rawPrice = p.stats.buyBoxPrice;
-      } else if (cur && cur.length > 1 && cur[1] > 0) {
-        rawPrice = cur[1]; // New price
-      } else if (cur && cur.length > 0 && cur[0] > 0) {
-        rawPrice = cur[0];
-      }
-    }
-
-    // Rating
-    // Rating: extract last value from reviews.ratingCount (pairs of [keepaTime, value])
-    let rawRating = null;
-    if (p.reviews?.ratingCount?.length >= 2) {
-      rawRating = p.reviews.ratingCount[p.reviews.ratingCount.length - 1];
-    }
-    const rating = rawRating ? (rawRating / 10).toFixed(1) : null;
-
-    // Reviews: extract last value from reviews.reviewCount
-    let reviews = 0;
-    if (p.reviews?.reviewCount?.length >= 2) {
-      reviews = p.reviews.reviewCount[p.reviews.reviewCount.length - 1];
-    }
-
-    // BSR
-    let bsr = null;
-    if (p.salesRanks) {
-      const rankKeys = Object.keys(p.salesRanks);
-      if (rankKeys.length) {
-        const rankData = p.salesRanks[rankKeys[0]];
-        if (Array.isArray(rankData) && rankData.length >= 2) {
-          bsr = rankData[rankData.length - 1]; // last rank value
-        }
-      }
-    }
-
-    // FBA: check buyBoxEligibleOfferCounts or fbaFees
-    const isFBA = !!(p.fbaFees || (p.buyBoxEligibleOfferCounts && p.buyBoxEligibleOfferCounts[0] > 0));
-
-    const priceStr = formatPrice(rawPrice);
+    const cur = p.stats?.current, bb = p.stats?.buyBoxPrice;
+    if (bb && bb > 0) rawPrice = bb;
+    else if (cur?.[1] > 0) rawPrice = cur[1];
+    else if (cur?.[0] > 0) rawPrice = cur[0];
+    const priceStr  = formatPrice(rawPrice);
     const priceHtml = priceStr
       ? `<span class="price-val">${priceStr}</span>`
       : `<span class="price-na">—</span>`;
+
+    // Rating
+    const rc = p.reviews?.ratingCount;
+    const rawRating = rc?.length >= 2 ? rc[rc.length - 1] : null;
+    const rating = rawRating ? (rawRating / 10).toFixed(1) : null;
+
+    // Reviews
+    const rvc = p.reviews?.reviewCount;
+    const reviews = rvc?.length >= 2 ? rvc[rvc.length - 1] : 0;
+
+    // BSR
+    let bsr = null;
+    const sr = p.salesRanks;
+    if (sr) {
+      const k  = Object.keys(sr)[0];
+      const rv = sr[k];
+      if (Array.isArray(rv) && rv.length >= 2) bsr = rv[rv.length - 1];
+    }
+
+    // FBA
+    const isFBA = !!(p.fbaFees || (p.buyBoxEligibleOfferCounts?.[0] > 0));
 
     const eanHtml = ean
       ? `<span class="ean-value" title="${eans.join(', ')}">${ean}</span>`
@@ -532,10 +528,7 @@ function renderTable() {
       : `<span style="color:var(--text-faint);font-size:12px;">—</span>`;
 
     const ratingHtml = rating
-      ? `<div class="rating-display">
-           <span class="rating-stars" title="${rating}">${starsHtml(rating)}</span>
-           <span class="rating-val">${rating}</span>
-         </div>`
+      ? `<div class="rating-display"><span class="rating-stars">${starsHtml(rating)}</span><span class="rating-val">${rating}</span></div>`
       : `<span style="color:var(--text-faint);">—</span>`;
 
     const reviewsHtml = reviews
@@ -545,22 +538,16 @@ function renderTable() {
     let bsrHtml = `<span style="color:var(--text-faint);">—</span>`;
     if (bsr) {
       const cls = bsr < 1000 ? 'rank-good' : bsr < 50000 ? 'rank-mid' : 'rank-val';
-      bsrHtml = `<span class="${cls}" title="Best Sellers Rank">#${bsr.toLocaleString('en-IN')}</span>`;
+      bsrHtml = `<span class="${cls}">#${bsr.toLocaleString('en-IN')}</span>`;
     }
 
     const fbaHtml = `<span class="${isFBA ? 'badge-fba' : 'badge-fbm'}">${isFBA ? 'FBA' : 'FBM'}</span>`;
 
-    const amazonUrl = `https://www.amazon.in/dp/${asin}`;
-
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="col-num"><div class="row-num">${rowNum}</div></td>
-      <td class="col-asin">
-        <span class="asin-chip" onclick="copyAsin('${asin}', event)" title="Click to copy ASIN">${asin}</span>
-      </td>
-      <td class="col-title">
-        <div class="product-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-      </td>
+      <td class="col-asin"><span class="asin-chip" onclick="copyAsin('${asin}',event)" title="Click to copy">${asin}</span></td>
+      <td class="col-title"><div class="product-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div></td>
       <td class="col-brand">${brandHtml}</td>
       <td class="col-ean">${eanHtml}</td>
       <td class="col-price">${priceHtml}</td>
@@ -568,11 +555,7 @@ function renderTable() {
       <td class="col-reviews">${reviewsHtml}</td>
       <td class="col-rank">${bsrHtml}</td>
       <td class="col-fba">${fbaHtml}</td>
-      <td class="col-link">
-        <a class="amazon-link" href="${amazonUrl}" target="_blank" rel="noopener" title="View on Amazon India">
-          ↗ View
-        </a>
-      </td>
+      <td class="col-link"><a class="amazon-link" href="https://www.amazon.in/dp/${asin}" target="_blank" rel="noopener">↗ View</a></td>
     `;
     tbody.appendChild(tr);
   });
@@ -584,143 +567,140 @@ function renderTable() {
 function renderPagination() {
   const pg = $('pagination');
   pg.innerHTML = '';
-  const total = STATE.totalPages;
-  const cur = STATE.page;
-
+  const total = STATE.totalPages, cur = STATE.page;
   if (total <= 1) return;
 
-  const addBtn = (label, page, disabled = false, active = false) => {
+  const addBtn = (label, p, disabled = false, active = false) => {
     const btn = document.createElement('button');
     btn.className = 'page-btn' + (active ? ' active' : '');
     btn.textContent = label;
     btn.disabled = disabled;
-    btn.onclick = () => { STATE.page = page; renderTable(); };
+    btn.onclick = () => { STATE.page = p; renderTable(); };
     pg.appendChild(btn);
   };
 
   addBtn('‹', cur - 1, cur === 1);
-
-  const range = getPaginationRange(cur, total);
+  const range = [];
+  for (let i = Math.max(1, cur - 2); i <= Math.min(total, cur + 2); i++) range.push(i);
+  if (range[0] > 1) range.unshift(1);
+  if (range[range.length - 1] < total) range.push(total);
   let last = 0;
   for (const p of range) {
     if (p - last > 1) {
-      const ellipsis = document.createElement('span');
-      ellipsis.textContent = '…';
-      ellipsis.style.cssText = 'padding: 0 6px; color: var(--text-muted); line-height: 34px;';
-      pg.appendChild(ellipsis);
+      const el = document.createElement('span');
+      el.textContent = '…';
+      el.style.cssText = 'padding:0 6px;color:var(--text-muted);line-height:34px;';
+      pg.appendChild(el);
     }
     addBtn(p, p, false, p === cur);
     last = p;
   }
-
   addBtn('›', cur + 1, cur === total);
-}
-
-function getPaginationRange(cur, total) {
-  const delta = 2;
-  const range = [];
-  for (let i = Math.max(1, cur - delta); i <= Math.min(total, cur + delta); i++) range.push(i);
-  if (range[0] > 1) range.unshift(1);
-  if (range[range.length - 1] < total) range.push(total);
-  return range;
 }
 
 // ============================================================
 // STATS
 // ============================================================
 function updateStats() {
-  const catKey = STATE.activeCategory;
-  const products = STATE.data[catKey].products;
-  const catInfo = CONFIG.CATEGORIES[catKey];
-
+  const products = STATE.data[STATE.activeCategory].products;
   if (!products.length) return;
 
-  // Total loaded
   $('sv-asins').textContent = formatNumber(products.length);
 
-  // Unique brands
   const brands = new Set(products.map(p => p.brand).filter(Boolean));
   $('sv-brands').textContent = formatNumber(brands.size);
 
-  // Average buy box price
-  const prices = products
-    .map(p => {
-      const cur = p.stats?.current;
-      const bbp = p.stats?.buyBoxPrice;
-      if (bbp && bbp > 0) return bbp;
-      if (cur && cur[1] > 0) return cur[1];
-      if (cur && cur[0] > 0) return cur[0];
-      return -1;
-    })
-    .filter(v => v > 0);
-  if (prices.length) {
-    const avg = prices.reduce((s, v) => s + v, 0) / prices.length;
-    $('sv-avg-price').textContent = '₹' + (avg / 100).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-  } else {
-    $('sv-avg-price').textContent = '—';
-  }
+  const prices = products.map(p => {
+    const c = p.stats?.current, bb = p.stats?.buyBoxPrice;
+    if (bb && bb > 0) return bb;
+    if (c?.[1] > 0) return c[1];
+    if (c?.[0] > 0) return c[0];
+    return -1;
+  }).filter(v => v > 0);
 
-  // EAN coverage
-  const withEan = products.filter(p => p.eanList && p.eanList.length > 0).length;
-  const eanPct = products.length ? Math.round((withEan / products.length) * 100) : 0;
-  $('sv-ean').textContent = eanPct + '%';
+  $('sv-avg-price').textContent = prices.length
+    ? '₹' + Math.round(prices.reduce((s,v) => s+v, 0) / prices.length / 100).toLocaleString('en-IN')
+    : '—';
 
-  // FBA %
-  const fbaCount = products.filter(p => !!(p.fbaFees || (p.buyBoxEligibleOfferCounts && p.buyBoxEligibleOfferCounts[0] > 0))).length;
-  const fbaPct = products.length ? Math.round((fbaCount / products.length) * 100) : 0;
-  $('sv-fba').textContent = fbaPct + '%';
+  const withEan = products.filter(p => p.eanList?.length > 0).length;
+  $('sv-ean').textContent = Math.round((withEan / products.length) * 100) + '%';
+
+  const fbaCount = products.filter(p => !!(p.fbaFees || p.buyBoxEligibleOfferCounts?.[0] > 0)).length;
+  $('sv-fba').textContent = Math.round((fbaCount / products.length) * 100) + '%';
 }
 
 function updateTokenDisplay() {
-  if (STATE.tokensLeft !== null) {
-    const el = $('token-count');
-    const tokens = STATE.tokensLeft;
-    el.textContent = `${tokens.toLocaleString('en-IN')} tokens`;
-    // Color-code by level
-    const wrap = el.closest('.token-display');
-    if (wrap) {
-      wrap.style.color = tokens < 0 ? '#DC2626' : tokens < 50 ? '#D97706' : '';
-      wrap.style.borderColor = tokens < 0 ? '#FCA5A5' : tokens < 50 ? '#FCD34D' : '';
-      wrap.style.background = tokens < 0 ? '#FEF2F2' : tokens < 50 ? '#FFFBEB' : '';
-    }
+  if (STATE.tokensLeft === null) return;
+  const el   = $('token-count');
+  const wrap = el?.closest('.token-display');
+  const t    = STATE.tokensLeft;
+  if (el) el.textContent = `${t.toLocaleString('en-IN')} tokens`;
+  if (wrap) {
+    wrap.style.color       = t < 0 ? '#DC2626' : t < 100 ? '#D97706' : '';
+    wrap.style.borderColor = t < 0 ? '#FCA5A5' : t < 100 ? '#FCD34D' : '';
+    wrap.style.background  = t < 0 ? '#FEF2F2' : t < 100 ? '#FFFBEB' : '';
   }
+}
+
+// ============================================================
+// CACHE BADGE UI
+// ============================================================
+function showCacheBadge(catKey, age) {
+  let badge = $('cache-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'cache-badge';
+    badge.style.cssText = `
+      display:flex;align-items:center;gap:8px;
+      background:#F0FDF4;border:1px solid rgba(34,197,94,.25);
+      border-radius:8px;padding:8px 14px;margin:0 24px 16px;
+      font-size:12px;font-weight:600;color:#166534;
+    `;
+    const tableWrapper = $('table-wrapper');
+    tableWrapper?.parentNode?.insertBefore(badge, tableWrapper);
+  }
+  badge.innerHTML = `
+    <span>📦</span>
+    <span>Served from cache · ${age || 'just now'} · <strong>0 tokens used</strong></span>
+    <button onclick="clearAllCache()" style="margin-left:auto;background:none;border:1px solid #BBF7D0;border-radius:6px;padding:3px 9px;font-size:11px;font-weight:600;color:#166534;cursor:pointer;font-family:inherit;">
+      🔄 Refresh Data
+    </button>
+  `;
+  badge.style.display = 'flex';
+}
+
+function hideCacheBadge() {
+  const badge = $('cache-badge');
+  if (badge) badge.style.display = 'none';
 }
 
 // ============================================================
 // BRAND FILTER
 // ============================================================
 function populateBrandFilter() {
-  const catKey = STATE.activeCategory;
-  const products = STATE.data[catKey].products;
-  const brandCounts = {};
-  products.forEach(p => {
-    if (p.brand) brandCounts[p.brand] = (brandCounts[p.brand] || 0) + 1;
-  });
-
-  const sorted = Object.entries(brandCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 80);
+  const products = STATE.data[STATE.activeCategory].products;
+  const counts   = {};
+  products.forEach(p => { if (p.brand) counts[p.brand] = (counts[p.brand] || 0) + 1; });
 
   const sel = $('filter-brand');
   const cur = sel.value;
   sel.innerHTML = '<option value="">All Brands</option>';
-  sorted.forEach(([brand, count]) => {
+  Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0, 80).forEach(([brand, cnt]) => {
     const opt = document.createElement('option');
     opt.value = brand.toLowerCase();
-    opt.textContent = `${brand} (${count})`;
+    opt.textContent = `${brand} (${cnt})`;
     sel.appendChild(opt);
   });
   if (cur) sel.value = cur;
 }
 
 // ============================================================
-// SEARCH & FILTER
+// SEARCH / FILTER / SORT
 // ============================================================
 const filterTable = debounce(() => {
   STATE.page = 1;
   renderTable();
-  const q = $('search-input').value;
-  $('search-clear').style.display = q ? 'flex' : 'none';
+  $('search-clear').style.display = $('search-input').value ? 'flex' : 'none';
 }, 200);
 
 function clearSearch() {
@@ -729,24 +709,15 @@ function clearSearch() {
   filterTable();
 }
 
-// ============================================================
-// SORTING
-// ============================================================
 function sortTable(col) {
-  if (STATE.sorted.col === col) {
-    STATE.sorted.dir = STATE.sorted.dir === 'asc' ? 'desc' : 'asc';
-  } else {
-    STATE.sorted.col = col;
-    STATE.sorted.dir = 'asc';
-  }
+  if (STATE.sorted.col === col) STATE.sorted.dir = STATE.sorted.dir === 'asc' ? 'desc' : 'asc';
+  else { STATE.sorted.col = col; STATE.sorted.dir = 'asc'; }
   STATE.page = 1;
   renderTable();
 }
 
 function updateSortHeaders() {
-  document.querySelectorAll('.data-table th.sortable').forEach(th => {
-    th.classList.remove('sort-asc', 'sort-desc');
-  });
+  document.querySelectorAll('.data-table th.sortable').forEach(th => th.classList.remove('sort-asc','sort-desc'));
   if (STATE.sorted.col) {
     const th = $(`th-${STATE.sorted.col}`);
     if (th) th.classList.add(STATE.sorted.dir === 'asc' ? 'sort-asc' : 'sort-desc');
@@ -757,69 +728,49 @@ function updateSortHeaders() {
 // EXPORT
 // ============================================================
 function exportCurrentData() {
-  const catKey = STATE.activeCategory;
+  const catKey   = STATE.activeCategory;
   const products = getFilteredProducts();
-
-  if (!products.length) {
-    showToast('⚠️ No data to export', 'error');
-    return;
-  }
+  if (!products.length) { showToast('⚠️ No data to export', 'error'); return; }
 
   const catName = CONFIG.CATEGORIES[catKey].name;
-  const rows = [
-    ['#', 'ASIN', 'Title', 'Brand', 'EAN/GTIN', 'All EANs', 'Price (₹)', 'Rating', 'Reviews', 'BSR', 'FBA', 'Category', 'Amazon URL']
-  ];
+  const rows = [['#','ASIN','Title','Brand','EAN/GTIN','All EANs','Price (₹)','Rating','Reviews','BSR','FBA','Category','Amazon URL']];
 
   products.forEach((p, i) => {
-    const asin = p.asin || '';
-    const title = (p.title || '').replace(/"/g, '""');
-    const brand = p.brand || '';
-    const eans = p.eanList || [];
-    const ean1 = eans[0] || '';
-    const allEans = eans.join('; ');
-
+    const eans  = p.eanList || [];
     let rawPrice = -1;
-    const cur = p.stats?.current;
-    const bbp = p.stats?.buyBoxPrice;
-    if (bbp && bbp > 0) rawPrice = bbp;
-    else if (cur && cur[1] > 0) rawPrice = cur[1];
-    else if (cur && cur[0] > 0) rawPrice = cur[0];
-    const price = rawPrice > 0 ? (rawPrice / 100).toFixed(2) : '';
+    const c = p.stats?.current, bb = p.stats?.buyBoxPrice;
+    if (bb && bb > 0) rawPrice = bb;
+    else if (c?.[1] > 0) rawPrice = c[1];
+    else if (c?.[0] > 0) rawPrice = c[0];
 
-    let rating = '';
-    if (p.reviews?.ratingCount?.length >= 2) {
-      rating = (p.reviews.ratingCount[p.reviews.ratingCount.length - 1] / 10).toFixed(1);
-    }
-
-    let reviews = '';
-    if (p.reviews?.reviewCount?.length >= 2) {
-      reviews = p.reviews.reviewCount[p.reviews.reviewCount.length - 1];
-    }
+    const rc  = p.reviews?.ratingCount;
+    const rvc = p.reviews?.reviewCount;
+    const rating  = rc?.length  >= 2 ? (rc[rc.length - 1]   / 10).toFixed(1) : '';
+    const reviews = rvc?.length >= 2 ? rvc[rvc.length - 1] : '';
 
     let bsr = '';
-    if (p.salesRanks) {
-      const rankKeys = Object.keys(p.salesRanks);
-      if (rankKeys.length) {
-        const rankData = p.salesRanks[rankKeys[0]];
-        if (Array.isArray(rankData) && rankData.length >= 2) bsr = rankData[rankData.length - 1];
-      }
-    }
+    const sr = p.salesRanks;
+    if (sr) { const k = Object.keys(sr)[0]; const v = sr[k]; if (Array.isArray(v) && v.length >= 2) bsr = v[v.length-1]; }
 
-    const fba = (p.isFBAPercent ?? 0) > 50 ? 'FBA' : 'FBM';
-    const url = `https://www.amazon.in/dp/${asin}`;
-
-    rows.push([i + 1, asin, `"${title}"`, brand, ean1, allEans, price, rating, reviews, bsr, fba, catName, url]);
+    rows.push([
+      i+1, p.asin||'',
+      `"${(p.title||'').replace(/"/g,'""')}"`,
+      p.brand||'', eans[0]||'', eans.join('; '),
+      rawPrice > 0 ? (rawPrice/100).toFixed(2) : '',
+      rating, reviews, bsr,
+      (p.fbaFees || p.buyBoxEligibleOfferCounts?.[0] > 0) ? 'FBA' : 'FBM',
+      catName, `https://www.amazon.in/dp/${p.asin||''}`
+    ]);
   });
 
-  const csv = rows.map(r => r.join(',')).join('\n');
+  const csv  = rows.map(r => r.join(',')).join('\n');
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
   a.href = url;
   a.download = `BulkListIQ_${catName.replace(/\s/g,'_')}_${new Date().toISOString().slice(0,10)}.csv`;
   a.click();
   URL.revokeObjectURL(url);
-
   showToast(`✅ Exported ${products.length} rows to CSV`, 'success');
 }
 
@@ -829,98 +780,68 @@ function exportCurrentData() {
 function showLoading() {
   $('loading-state').style.display = 'flex';
   $('table-wrapper').style.display = 'none';
-  $('error-state').style.display = 'none';
+  $('error-state').style.display   = 'none';
+  hideCacheBadge();
 }
-
 function showTable() {
   $('loading-state').style.display = 'none';
   $('table-wrapper').style.display = 'block';
-  $('error-state').style.display = 'none';
+  $('error-state').style.display   = 'none';
 }
-
 function showError(title, sub) {
   $('loading-state').style.display = 'none';
   $('table-wrapper').style.display = 'none';
-  $('error-state').style.display = 'flex';
+  $('error-state').style.display   = 'flex';
   $('error-title').textContent = title;
-  $('error-sub').textContent = sub;
+  $('error-sub').textContent   = sub;
 }
-
 function setLoadingText(title, sub) {
   const el = $('loading-title');
   el.textContent = title;
   el.classList.toggle('waiting', title.startsWith('⏳'));
   $('loading-sub').textContent = sub;
 }
-
 function setProgress(pct) {
-  $('loading-bar').style.cssText = `width: ${pct}%; animation: none;`;
+  $('loading-bar').style.cssText = `width:${pct}%;animation:none;`;
 }
-
 function retryLoad() {
   const catKey = STATE.activeCategory;
   STATE.data[catKey].loaded = false;
   STATE.data[catKey].products = [];
-  STATE.data[catKey].asins = [];
-  // Reset the loading bar to indeterminate animation
-  const bar = $('loading-bar');
-  if (bar) bar.style.cssText = '';
+  STATE.data[catKey].bestsellersAsins = [];
+  $('loading-bar').style.cssText = '';
   showLoading();
   loadCategoryData(catKey);
 }
 
 // ============================================================
-// TOAST
+// TOAST & COPY
 // ============================================================
 function showToast(msg, type = 'info') {
-  const container = $('toast-container');
-  const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  toast.innerHTML = `<span class="toast-icon">${type === 'success' ? '✓' : type === 'error' ? '✕' : 'ℹ'}</span><span>${msg}</span>`;
-  container.appendChild(toast);
-  setTimeout(() => {
-    toast.style.animation = 'toastOut .3s ease forwards';
-    setTimeout(() => toast.remove(), 300);
-  }, 3500);
+  const c = $('toast-container');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<span class="toast-icon">${type==='success'?'✓':type==='error'?'✕':'ℹ'}</span><span>${msg}</span>`;
+  c.appendChild(t);
+  setTimeout(() => { t.style.animation = 'toastOut .3s ease forwards'; setTimeout(() => t.remove(), 300); }, 4000);
 }
 
-// ============================================================
-// COPY ASIN
-// ============================================================
 function copyAsin(asin, event) {
   navigator.clipboard.writeText(asin).then(() => {
-    const badge = document.createElement('div');
-    badge.className = 'copied-badge';
-    badge.textContent = 'Copied!';
-    badge.style.left = `${event.clientX - 30}px`;
-    badge.style.top = `${event.clientY - 30}px`;
-    document.body.appendChild(badge);
-    setTimeout(() => badge.remove(), 1300);
-  }).catch(() => {
-    showToast(`ASIN: ${asin}`, 'info');
-  });
+    const b = document.createElement('div');
+    b.className = 'copied-badge';
+    b.textContent = 'Copied!';
+    b.style.left = `${event.clientX - 30}px`;
+    b.style.top  = `${event.clientY - 30}px`;
+    document.body.appendChild(b);
+    setTimeout(() => b.remove(), 1300);
+  }).catch(() => showToast(`ASIN: ${asin}`, 'info'));
 }
 
 // ============================================================
-// HTML ESCAPE
-// ============================================================
-function escapeHtml(str) {
-  return (str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-// ============================================================
-// SEARCH INPUT HANDLER
+// INIT
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
-  // Init category counts from config
-  Object.keys(CONFIG.CATEGORIES).forEach(key => {
-    $(`count-${key}`).textContent = '—';
-  });
-
-  // Load initial category
+  Object.keys(CONFIG.CATEGORIES).forEach(key => $(`count-${key}`).textContent = '—');
   loadCategoryData('electronics');
 });
