@@ -83,6 +83,7 @@ function cacheAge(catKey) {
 }
 
 function clearAllCache() {
+  if (STATE.loading) return;
   ['electronics', 'automotive', 'home'].forEach(cat => {
     localStorage.removeItem(`bliq_asins_${cat}`);
     localStorage.removeItem(`bliq_products_${cat}`);
@@ -248,7 +249,8 @@ async function fetchProductBatch(asins) {
 // MAIN LOAD FUNCTION
 // ============================================================
 async function loadCategoryData(catKey) {
-  if (STATE.data[catKey].loaded) return;
+  if (STATE.data[catKey].loaded || STATE.data[catKey].fetching) return;
+  STATE.data[catKey].fetching = true;
   STATE.loading = true;
   showLoading();
 
@@ -324,6 +326,7 @@ async function loadCategoryData(catKey) {
     showError('Failed to load data', err.message || 'Check console for details');
   } finally {
     STATE.loading = false;
+    STATE.data[catKey].fetching = false;
   }
 }
 
